@@ -52,10 +52,34 @@ def lookup_plant(plant_name: str) -> dict:
 
     Before writing code, complete the lookup_plant section of specs/tool-functions-spec.md.
     """
+    # Strip whitespace and lowercase so all comparisons are case-insensitive.
+    normalized = plant_name.strip().lower()
+
+    # 1. Direct key match — O(1) dict lookup, the most common clean case.
+    if normalized in _plant_db:
+        return {"found": True, "plant": _plant_db[normalized]}
+
+    # 2. Display name match, then 3. alias match — scan each plant once.
+    for plant in _plant_db.values():
+        if plant.get("display_name", "").lower() == normalized:
+            return {"found": True, "plant": plant}
+        if any(normalized == alias.lower() for alias in plant.get("aliases", [])):
+            return {"found": True, "plant": plant}
+
+    # Not found: tell the agent what we searched for and which plants exist,
+    # so it can offer real options instead of inventing care advice.
+    available = ", ".join(
+        plant.get("display_name", key) for key, plant in _plant_db.items()
+    )
     return {
         "found": False,
-        "name": plant_name,
-        "message": "Plant lookup not yet implemented. Complete Milestone 1.",
+        "name": normalized,
+        "message": (
+            f"No plant matching '{normalized}' was found in the database. "
+            f"The database contains these plants: {available}. "
+            "Ask the user to pick one of these, or to clarify the plant name "
+            "(common or scientific) if they meant something else."
+        ),
     }
 
 

@@ -1,7 +1,12 @@
 import json
-from groq import Groq
+from groq import Groq, BadRequestError
 from config import GROQ_API_KEY, LLM_MODEL, MAX_TOOL_ROUNDS
 from tools import lookup_plant, get_seasonal_conditions
+
+# How many times to retry a single LLM call that fails with a transient,
+# model-side malformed-tool-call error (Groq "tool_use_failed"). The model
+# occasionally emits invalid tool syntax; a fresh attempt usually succeeds.
+_MAX_LLM_RETRIES = 2
 
 _client = Groq(api_key=GROQ_API_KEY)
 
@@ -85,15 +90,41 @@ SYSTEM_PROMPT = (
 
 def dispatch_tool(tool_name: str, tool_args: dict) -> str:
     """Route a tool call to the correct function and return the result as a JSON string."""
-    print(f"  → Tool call: {tool_name}({tool_args})")
-    if tool_name == "lookup_plant":
-        result = lookup_plant(tool_args["plant_name"])
-    elif tool_name == "get_seasonal_conditions":
-        result = get_seasonal_conditions(tool_args.get("season"))
-    else:
-        result = {"error": f"Unknown tool: {tool_name}"}
-    print(f"  ← Result: {json.dumps(result)[:120]}{'...' if len(json.dumps(result)) > 120 else ''}")
-    return json.dumps(result)
+    print(f"  -> Tool call: {tool_name}({tool_args})")
+    try:
+        if tool_name == "lookup_plant":
+            # The model is supposed to send plant_name, but guard against it
+            # omitting the required argument so we return data, not a crash.
+            result = lookup_plant(tool_args["plant_name"])
+        elif tool_name == "get_seasonal_conditions":
+            result = get_seasonal_conditions(tool_args.get("season"))
+        else:
+            result = {"error": f"Unknown tool: {tool_name}"}
+    except Exception as e:
+        # Any tool-level failure (bad args, data issue) becomes a structured
+        # error the LLM can read and recover from, instead of killing the turn.
+        result = {"error": f"Tool '{tool_name}' failed: {e}"}
+    encoded = json.dumps(result)
+    print(f"  <- Result: {encoded[:120]}{'...' if len(encoded) > 120 else ''}")
+    return encoded
+
+
+def _create_completion(**kwargs):
+    """
+    Wrapper around the Groq completion call that retries the transient
+    "tool_use_failed" error — the model sometimes emits malformed tool-call
+    syntax and Groq rejects it with a 400. A retry almost always succeeds.
+    Other errors are re-raised immediately (no point retrying a bad request).
+    """
+    for attempt in range(_MAX_LLM_RETRIES + 1):
+        try:
+            return _client.chat.completions.create(**kwargs)
+        except BadRequestError as e:
+            transient = "tool_use_failed" in str(e)
+            if transient and attempt < _MAX_LLM_RETRIES:
+                print(f"  [retry] tool_use_failed (attempt {attempt + 1}); retrying")
+                continue
+            raise
 
 
 # ──────────────────────────────────────────────
@@ -128,4 +159,77 @@ def run_agent(user_message: str, history: list) -> str:
 
     Before writing code, complete specs/agent-loop-spec.md.
     """
-    return "🌱 Agent not yet implemented. Complete Milestone 2 to activate the Plant Advisor."
+    FALLBACK = (
+        "Sorry — I ran into trouble answering that. Could you rephrase your "
+        "question or tell me which plant you're asking about?"
+    )
+
+    # 1. Build the messages list: system prompt + replayed history + new message.
+    #
+    # Gradio can hand us history in two shapes depending on the ChatInterface
+    # config. app.py uses type="messages", which passes a flat list of
+    # {"role", "content"} dicts. The older default passes [user, assistant]
+    # pairs. Support both so the agent never loses conversation context.
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for item in history:
+        if isinstance(item, dict):
+            # messages format — append role/content turns directly
+            if item.get("role") and item.get("content"):
+                messages.append({"role": item["role"], "content": item["content"]})
+        else:
+            # pairs format — [user_msg, assistant_msg]
+            user_msg, assistant_msg = item
+            messages.append({"role": "user", "content": user_msg})
+            if assistant_msg:
+                messages.append({"role": "assistant", "content": assistant_msg})
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        # 2. Tool-calling loop, capped at MAX_TOOL_ROUNDS to prevent runaways.
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = _create_completion(
+                model=LLM_MODEL,
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+            )
+            assistant_message = response.choices[0].message
+
+            # Termination (a): no tool calls means the LLM has a final answer.
+            if not assistant_message.tool_calls:
+                return assistant_message.content or FALLBACK
+
+            # Append the assistant message BEFORE any tool results — the API
+            # requires each tool result to follow the call that requested it.
+            messages.append(assistant_message)
+
+            # Execute every requested tool call and append its result.
+            for tool_call in assistant_message.tool_calls:
+                tool_name = tool_call.function.name
+                # The model may send "", "null", or malformed JSON for a tool
+                # with no required args. Normalize anything that isn't a dict
+                # to {} so dispatch_tool always gets a usable mapping.
+                raw_args = tool_call.function.arguments
+                try:
+                    parsed = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError:
+                    parsed = {}
+                tool_args = parsed if isinstance(parsed, dict) else {}
+                tool_result = dispatch_tool(tool_name, tool_args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result,
+                })
+
+        # Termination (b): hit MAX_TOOL_ROUNDS and still being asked for tools.
+        # Force a plain-text answer with one final tool-less call.
+        final = _create_completion(
+            model=LLM_MODEL,
+            messages=messages,
+        )
+        return final.choices[0].message.content or FALLBACK
+
+    except Exception as e:
+        print(f"  [agent error] {e}")
+        return FALLBACK

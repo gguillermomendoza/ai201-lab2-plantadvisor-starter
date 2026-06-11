@@ -122,7 +122,15 @@ for tool_call in assistant_message.tool_calls:
 *The loop should stop when: (a) the LLM returns a response with no tool calls, OR (b) the MAX_TOOL_ROUNDS limit is reached. Describe how you will detect each condition and what you will return in each case.*
 
 ```
-[your answer here]
+(a) After each LLM call, read response.choices[0].message. If its `tool_calls`
+    attribute is falsy (None / empty list), the LLM has produced a final answer.
+    Break out of the loop and return message.content.
+
+(b) The loop body runs at most MAX_TOOL_ROUNDS times (a `for _ in range(...)`).
+    If we finish the last iteration and the LLM is STILL asking for tools, we've
+    hit the safety cap. Make one final LLM call with NO tools (tool_choice
+    unavailable) to force a plain-text answer, and return that content. If even
+    that is empty, return a user-readable fallback string so output is never empty.
 ```
 
 ---
@@ -132,7 +140,10 @@ for tool_call in assistant_message.tool_calls:
 *Once the loop exits because there are no more tool calls, how do you extract the text content from the response object? What field holds the string you should return?*
 
 ```
-[your answer here]
+The text lives at response.choices[0].message.content — a plain string. Once the
+loop exits on the no-tool-calls condition, return that `.content`. Guard against a
+None/empty content with a fallback string so run_agent() never returns an empty
+response.
 ```
 
 ---
@@ -144,20 +155,36 @@ for tool_call in assistant_message.tool_calls:
 **Trace of a working agent turn (what tools were called and in what order):**
 
 ```
-Query: "How should I care for my calathea?"
-Round 1 tool call: [tool name, args]
-Round 2 tool call: [tool name, args] (if any)
-Final response: [brief description]
+Query: "What should I do for my pothos this winter?"
+Round 1 tool calls (both in ONE assistant message — parallel tool calls):
+    lookup_plant({"plant_name": "pothos"})
+    get_seasonal_conditions({"season": "winter"})
+Round 2: no tool calls — LLM produced the final answer.
+Final response: Grounded pothos winter care — water ~every 2–4 weeks (less than
+the usual 1–2), more bright indirect light, hold off on fertilizer. Cites the
+care data, combining the plant entry with the winter seasonal context.
 ```
 
 **What happens when you ask about a plant that isn't in the database?**
 
 ```
-[describe the behavior you observed]
+lookup_plant returns {"found": false, ...} with the message listing the available
+plants. The LLM reads that message and, instead of inventing care data, explains
+the plant wasn't found and asks the user to clarify/specify (e.g. for "bonsai
+tree" it noted bonsai is a technique, not a species, and asked which tree).
+Graceful degradation works as designed.
 ```
 
 **One thing about the tool call API that surprised you:**
 
 ```
-[your answer here]
+Two things:
+1. The LLM can request MULTIPLE tools in a SINGLE assistant message (parallel
+   tool calls), so you must loop over assistant_message.tool_calls and append a
+   tool-result message for EACH one before calling the LLM again — appending only
+   the first would break the assistant/tool message pairing the API requires.
+2. The model (llama-3.3-70b on Groq) occasionally emits malformed tool-call
+   syntax and Groq returns a 400 "tool_use_failed" instead of a normal response.
+   It's intermittent — a retry succeeds. The try/except fallback keeps run_agent
+   from crashing when this happens.
 ```

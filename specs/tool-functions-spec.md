@@ -70,7 +70,13 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 *Aliases are stored as a list of strings. How will you check if the normalized input matches any alias in the list? Write your approach in pseudocode or plain English.*
 
 ```
-[your answer here]
+For each plant, lowercase every alias and build a list, then test membership:
+    if normalized in [alias.lower() for alias in plant["aliases"]]
+This is case-insensitive and matches the whole alias string exactly (after the
+input was already stripped + lowercased). Use a generator with any() so we stop
+at the first match:
+    if any(normalized == alias.lower() for alias in plant.get("aliases", []))
+.get with a default guards plants that have no aliases key.
 ```
 
 ---
@@ -80,7 +86,14 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 *When a plant isn't found, the agent will read your message and use it to decide what to tell the user. Write the exact string you'll return — make it useful to the agent, not just to a human reading logs.*
 
 ```
-[your answer here]
+"No plant matching '<normalized>' was found in the database. The database
+contains these plants: <comma-separated display names>. Ask the user to pick one
+of these, or to clarify the plant name (common or scientific) if they meant
+something else."
+
+The message tells the agent (1) what was searched for, (2) the full set of plants
+it CAN answer about, and (3) what to do next — so it won't hallucinate care advice
+for an unknown plant and can offer the user real options.
 ```
 
 ---
@@ -91,17 +104,22 @@ likely match for clean user input. Aliases are the broadest net, so they go last
 
 **Test: does `"devil's ivy"` return the pothos entry?**
 ```
-[yes / no — if no, describe what happened]
+yes — matched via the alias list (case-insensitive).
 ```
 
 **Test: does `"SNAKE PLANT"` return the snake plant entry?**
 ```
-[yes / no — if no, describe what happened]
+yes — input is lowercased to "snake plant" and matched against display_name.
+Note the direct key is "snake_plant" (underscore), so this hits step 2, not step 1.
 ```
 
 **One edge case you discovered while implementing:**
 ```
-[your answer here]
+The display-name form "snake plant" (space) is NOT the same as the db key
+"snake_plant" (underscore), so a key-only lookup would miss it. The display_name
+and alias passes are what catch human-typed names. Also guarded plants that lack
+an "aliases" or "display_name" key with .get(..., default) so the scan never
+raises a KeyError.
 ```
 
 ---
