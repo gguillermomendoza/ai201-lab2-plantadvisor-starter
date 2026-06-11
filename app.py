@@ -34,7 +34,15 @@ def chat(message: str, history: list) -> str:
 # UI
 # ──────────────────────────────────────────────
 
-with gr.Blocks(title="Plant Advisor") as demo:
+with gr.Blocks(
+    title="Plant Advisor",
+    theme=gr.themes.Default(
+        primary_hue="green",
+        secondary_hue="emerald",
+        neutral_hue="stone",
+        font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+    ),
+) as demo:
 
     gr.Markdown(
         """
@@ -79,11 +87,4 @@ with gr.Blocks(title="Plant Advisor") as demo:
             )
 
 if __name__ == "__main__":
-    demo.launch(
-        theme=gr.themes.Default(
-            primary_hue="green",
-            secondary_hue="emerald",
-            neutral_hue="stone",
-            font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
-        )
-    )
+    demo.launch()
